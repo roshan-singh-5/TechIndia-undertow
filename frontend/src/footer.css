@@ -1,0 +1,30 @@
+/* Expanded landing-page footer treatment. */
+.landing footer {
+  max-width: none;
+  padding: 30px max(24px, calc((100% - 1132px) / 2));
+  border-top: 1px solid #e5ebf3;
+  color: #66758b;
+  gap: 20px;
+}
+
+.landing footer::after {
+  content: "Authorised analyst use only · Privacy & responsible-use";
+  color: #8290a4;
+  font-size: 11px;
+  text-align: right;
+}
+
+.landing footer .brand {
+  flex-shrink: 0;
+}
+
+@media (max-width: 650px) {
+  .landing footer {
+    justify-items: start;
+  }
+
+  .landing footer::after {
+    line-height: 1.5;
+    text-align: left;
+  }
+}
