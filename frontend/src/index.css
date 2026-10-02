@@ -466,7 +466,16 @@ td {
 }
 
 /* RESPONSIVE */
+@media (max-width: 900px) {
+  .network-container {
+    grid-template-columns: 1fr;
+  }
 
+  .network-side-panel {
+    border-left: none;
+    border-top: 1px solid #e5e7eb;
+  }
+}
 @media (max-width: 1000px) {
   .sidebar {
     width: 190px;
@@ -502,4 +511,120 @@ td {
   .file-input {
     flex: 1;
   }
+}
+/* TRANSACTION NETWORK */
+
+.network-panel {
+  overflow: hidden;
+}
+
+.network-container {
+  display: grid;
+  grid-template-columns: 1fr 260px;
+  min-height: 520px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.network-graph {
+  min-height: 520px;
+  background: #f8fafc;
+  position: relative;
+}
+
+.network-side-panel {
+  background: white;
+  border-left: 1px solid #e5e7eb;
+  padding: 20px;
+}
+
+.network-side-panel h3 {
+  margin: 8px 0 20px;
+  font-size: 20px;
+}
+
+.network-stat {
+  padding: 14px 0;
+  border-bottom: 1px solid #eef1f5;
+}
+
+.network-stat span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+
+.network-stat strong {
+  font-size: 22px;
+}
+
+.network-help {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 25px;
+}
+
+.network-empty {
+  text-align: center;
+  margin-top: 100px;
+}
+
+.network-icon {
+  width: 55px;
+  height: 55px;
+  border-radius: 50%;
+  background: #eff6ff;
+  color: #2563eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: auto;
+  font-size: 24px;
+}
+
+.network-empty h3 {
+  font-size: 16px;
+  margin: 15px 0 5px;
+}
+
+.network-empty p {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.network-legend {
+  display: flex;
+  gap: 20px;
+  padding: 12px 4px 0;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.network-legend span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.legend-dot.high {
+  background: #ef4444;
+}
+
+.legend-dot.medium {
+  background: #f59e0b;
+}
+
+.legend-dot.low {
+  background: #2563eb;
 }

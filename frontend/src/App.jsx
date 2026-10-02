@@ -1,9 +1,130 @@
 import { useState } from "react";
 import axios from "axios";
+import ForceGraph2D from "react-force-graph-2d";
 import "./index.css";
 
 const API_URL = "http://127.0.0.1:8000";
+function TransactionNetwork({ graph }) {
+  const [selectedNode, setSelectedNode] = useState(null);
 
+  if (!graph || !graph.nodes || graph.nodes.length === 0) {
+    return (
+      <div className="empty-state">
+        No transaction network available.
+      </div>
+    );
+  }
+
+  const graphData = {
+    nodes: graph.nodes.map((node) => ({
+      ...node,
+      id: node.id,
+    })),
+    links: graph.edges.map((edge) => ({
+      source: edge.source,
+      target: edge.target,
+      amount: edge.amount,
+      transaction_count: edge.transaction_count,
+    })),
+  };
+
+  return (
+    <div className="network-container">
+      <div className="network-graph">
+        <ForceGraph2D
+          graphData={graphData}
+          nodeLabel={(node) =>
+            `${node.account_id}\nIncoming: ${node.incoming_count}\nOutgoing: ${node.outgoing_count}`
+          }
+          nodeRelSize={7}
+          linkDirectionalArrowLength={6}
+          linkDirectionalArrowRelPos={1}
+          linkWidth={(link) =>
+            Math.min(1 + link.transaction_count, 5)
+          }
+          linkLabel={(link) =>
+            `₹${Number(link.amount).toLocaleString()}`
+          }
+          onNodeClick={(node) => setSelectedNode(node)}
+          nodeCanvasObject={(node, ctx, globalScale) => {
+            const label = node.account_id;
+            const fontSize = Math.max(9 / globalScale, 3);
+
+            ctx.beginPath();
+            ctx.arc(
+              node.x,
+              node.y,
+              6,
+              0,
+              2 * Math.PI,
+              false
+            );
+
+            if (node.account_id === selectedNode?.account_id) {
+  ctx.fillStyle = "#111827";
+} else if (node.risk_level === "High") {
+  ctx.fillStyle = "#ef4444";
+} else if (node.risk_level === "Medium") {
+  ctx.fillStyle = "#f59e0b";
+} else {
+  ctx.fillStyle = "#2563eb";
+}
+
+            ctx.fill();
+
+            if (globalScale > 0.7) {
+              ctx.font = `${fontSize}px Arial`;
+              ctx.textAlign = "center";
+              ctx.textBaseline = "middle";
+              ctx.fillStyle = "#172033";
+
+              ctx.fillText(
+                label,
+                node.x,
+                node.y + 12
+              );
+            }
+          }}
+        />
+      </div>
+
+      <div className="network-side-panel">
+        <p className="eyebrow">NETWORK INSPECTION</p>
+
+        {selectedNode ? (
+          <>
+            <h3>{selectedNode.account_id}</h3>
+
+            <div className="network-stat">
+              <span>Incoming transactions</span>
+              <strong>{selectedNode.incoming_count}</strong>
+            </div>
+
+            <div className="network-stat">
+              <span>Outgoing transactions</span>
+              <strong>{selectedNode.outgoing_count}</strong>
+            </div>
+
+            <p className="network-help">
+              Click another account in the network to inspect it.
+            </p>
+          </>
+        ) : (
+          <div className="network-empty">
+            <div className="network-icon">◎</div>
+
+            <h3>Select an account</h3>
+
+            <p>
+              Click any node in the transaction network to
+              inspect its activity.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 function App() {
   const [file, setFile] = useState(null);
   const [data, setData] = useState(null);
@@ -268,7 +389,38 @@ function App() {
                 </div>
               )}
             </section>
+{/* Transaction Network */}
+<section className="panel network-panel">
+  <div className="panel-header">
+    <div>
+      <p className="eyebrow">TRANSACTION GRAPH</p>
+      <h3>Money Flow Network</h3>
+    </div>
 
+    <span className="analysis-status">
+      {data.graph.nodes.length} Accounts ·{" "}
+      {data.graph.edges.length} Connections
+    </span>
+  </div>
+
+  <TransactionNetwork graph={data.graph} />
+  <div className="network-legend">
+  <span>
+    <i className="legend-dot high"></i>
+    High Risk
+  </span>
+
+  <span>
+    <i className="legend-dot medium"></i>
+    Medium Risk
+  </span>
+
+  <span>
+    <i className="legend-dot low"></i>
+    Low Risk
+  </span>
+</div>
+</section>
             {/* Accounts */}
             <section className="panel">
               <div className="panel-header">

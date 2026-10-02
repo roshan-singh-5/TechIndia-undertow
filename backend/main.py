@@ -1,4 +1,3 @@
-
 from io import BytesIO
 
 import pandas as pd
@@ -15,6 +14,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
+
 # Allow the local React development server to call this API.
 app.add_middleware(
     CORSMiddleware,
@@ -27,6 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 REQUIRED_COLUMNS = [
     "transaction_id",
     "timestamp",
@@ -34,6 +35,7 @@ REQUIRED_COLUMNS = [
     "receiver_account",
     "amount",
 ]
+
 
 latest_analysis = None
 
@@ -67,8 +69,10 @@ async def upload_transactions(file: UploadFile = File(...)):
             )
 
         df = pd.read_csv(BytesIO(contents))
+
         df.columns = df.columns.str.strip()
 
+        # Check required columns
         missing = [
             column
             for column in REQUIRED_COLUMNS
@@ -91,6 +95,7 @@ async def upload_transactions(file: UploadFile = File(...)):
                 detail="The CSV contains no transactions.",
             )
 
+        # Clean string columns
         for column in [
             "transaction_id",
             "sender_account",
@@ -98,28 +103,41 @@ async def upload_transactions(file: UploadFile = File(...)):
         ]:
             df[column] = df[column].astype("string").str.strip()
 
-        if df[[
-            "transaction_id",
-            "sender_account",
-            "receiver_account",
-        ]].isna().any().any():
+        # Check missing IDs
+        if (
+            df[
+                [
+                    "transaction_id",
+                    "sender_account",
+                    "receiver_account",
+                ]
+            ]
+            .isna()
+            .any()
+            .any()
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="Transaction IDs and account IDs cannot be empty.",
             )
 
+        # Check blank IDs
         if (
-            df[[
-                "transaction_id",
-                "sender_account",
-                "receiver_account",
-            ]] == ""
+            df[
+                [
+                    "transaction_id",
+                    "sender_account",
+                    "receiver_account",
+                ]
+            ]
+            == ""
         ).any().any():
             raise HTTPException(
                 status_code=400,
                 detail="Transaction IDs and account IDs cannot be blank.",
             )
 
+        # Validate timestamps
         df["timestamp"] = pd.to_datetime(
             df["timestamp"],
             errors="coerce",
@@ -131,6 +149,7 @@ async def upload_transactions(file: UploadFile = File(...)):
                 detail="One or more timestamps are invalid.",
             )
 
+        # Validate transaction amounts
         df["amount"] = pd.to_numeric(
             df["amount"],
             errors="coerce",
@@ -142,42 +161,77 @@ async def upload_transactions(file: UploadFile = File(...)):
                 detail="Amounts must be valid non-negative numbers.",
             )
 
+        # Transaction IDs must be unique
         if df["transaction_id"].duplicated().any():
             raise HTTPException(
                 status_code=400,
                 detail="Transaction IDs must be unique.",
             )
 
+        # Run fraud detection
         summary = analyze_transactions(df)
+
+        # Build transaction graph
         graph = build_transaction_graph(df)
 
+        # ---------------------------------------------------------
+        # Add risk information to graph nodes
+        # ---------------------------------------------------------
+
+        risk_map = {
+            account["account_id"]: {
+                "risk_score": account["risk_score"],
+                "risk_level": account["risk_level"],
+            }
+            for account in summary["accounts_data"]
+        }
+
+        for node in graph["nodes"]:
+            risk = risk_map.get(node["account_id"], {})
+
+            node["risk_score"] = risk.get("risk_score", 0)
+            node["risk_level"] = risk.get("risk_level", "Low")
+
+        # ---------------------------------------------------------
+        # Store complete analysis
+        # ---------------------------------------------------------
+
         latest_analysis = {
-    "summary": {
-        "transactions": summary["transactions"],
-        "accounts": summary["accounts"],
-        "total_amount": summary["total_amount"],
-        "flagged_accounts": summary["flagged_accounts"],
-    },
-    "accounts": summary["accounts_data"],
-    "alerts": summary["alerts"],
-    "graph": graph,
-    "detection_status": "Rule-based analysis",
-}
+            "summary": {
+                "transactions": summary["transactions"],
+                "accounts": summary["accounts"],
+                "total_amount": summary["total_amount"],
+                "flagged_accounts": summary["flagged_accounts"],
+            },
+            "accounts": summary["accounts_data"],
+            "alerts": summary["alerts"],
+            "graph": graph,
+            "detection_status": "Rule-based analysis",
+        }
 
         return latest_analysis
 
     except HTTPException:
         raise
-    except (ValueError, UnicodeDecodeError, pd.errors.ParserError) as exc:
+
+    except (
+        ValueError,
+        UnicodeDecodeError,
+        pd.errors.ParserError,
+    ) as exc:
         raise HTTPException(
             status_code=400,
             detail=f"Could not read the CSV: {exc}",
         ) from exc
+
     except Exception as exc:
+        print(f"UNTERTOW ERROR: {exc}")
+
         raise HTTPException(
             status_code=500,
             detail="An unexpected error occurred while processing the CSV.",
         ) from exc
+
     finally:
         await file.close()
 
