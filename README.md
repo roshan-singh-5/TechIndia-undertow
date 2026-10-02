@@ -15,6 +15,8 @@ Copy `backend/.env.example` to `backend/.env` only if you need to override devel
 - Account, transaction, and network explorer views
 - Directed interactive graph with risk-coloured nodes
 - Analyst review statuses (`Pending`, `Confirmed Suspicious`, `Cleared`) and audit history
+- Deterministic Investigation Copilot API: account facts, detector-rule contributions, evidence questions, and suggested checks; it is explicitly not an LLM or an automated decision
+- Fund Trace and an Integration Hub with a clearly labelled synthetic-only Demo Bank Connector
 
 ## Stack and structure
 
@@ -53,6 +55,8 @@ Required columns are `transaction_id`, `timestamp`, `sender_account`, `receiver_
 - `POST /api/analyze` — upload CSV and return summary, accounts, alerts, graph, and transaction records
 - `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout` — persistent analyst authentication
 - `GET /api/summary`, `/api/alerts`, `/api/graph`, `/api/transactions` — latest analysis
+- `POST /api/demo/load` — load the repository's synthetic demo fixture
+- `GET /api/copilot/{account_id}`, `GET /api/fund-trace`, `GET /api/priorities` — evidence brief, observed relationship trace, and transparent operational ordering
 - `POST /api/reviews` — save an account review
 - `GET /api/reviews/{account_id}` — review history
 
@@ -63,7 +67,7 @@ cd frontend; npm run build
 cd ..\backend; py -m compileall main.py detector.py graph_engine.py
 ```
 
-Then register an analyst account, sign in, upload `backend/sample_data/transactions.csv`, inspect each workspace route, select a network node, and save a review. Review history is stored in SQLite and is attributed to the authenticated analyst by the server.
+Then register an analyst account, sign in, open Integrations and use **Load Demo Dataset**, inspect the dashboard, Fund Trace, Network Explorer, and Investigation Center, then save a review. Review history is stored in SQLite and is attributed to the authenticated analyst by the server. The demo fixture and its limitations are documented in `backend/sample_data/README.md`.
 
 ## Limitations and next steps
 

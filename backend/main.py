@@ -6,6 +6,7 @@ import re
 import secrets
 import sqlite3
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
@@ -282,6 +283,13 @@ async def analyze_csv(file: UploadFile = File(...), user=Depends(require_csrf)):
         for column in ["transaction_id", "sender_account", "receiver_account"]:
             if df[column].isna().any() or df[column].astype(str).str.strip().eq("").any():
                 raise HTTPException(status_code=400, detail=f"CSV contains empty values in {column}.")
+        df["transaction_id"] = df["transaction_id"].astype(str).str.strip()
+        df["sender_account"] = df["sender_account"].astype(str).str.strip()
+        df["receiver_account"] = df["receiver_account"].astype(str).str.strip()
+        duplicate_ids = df["transaction_id"].duplicated()
+        if duplicate_ids.any():
+            duplicates = df.loc[duplicate_ids, "transaction_id"].head(5).tolist()
+            raise HTTPException(status_code=400, detail={"message": "CSV contains duplicate transaction IDs.", "duplicate_transaction_ids": duplicates})
         summary, graph = analyze_transactions(df), build_transaction_graph(df)
         risk_map = {a["account_id"]: a for a in summary["accounts_data"]}
         with database() as connection:
@@ -294,7 +302,15 @@ async def analyze_csv(file: UploadFile = File(...), user=Depends(require_csrf)):
                 account.update({"review_status": prior["status"] if prior else "Pending", "analyst_id": prior["analyst_id"] if prior else "", "review_note": prior["note"] if prior else "", "reviewed_at": prior["reviewed_at"] if prior else ""})
         records = [{key: (value.isoformat() if isinstance(value, pd.Timestamp) else value) for key, value in row.items()} for row in df.to_dict(orient="records")]
         summary_data = {key: summary[key] for key in ("transactions", "accounts", "total_amount", "flagged_accounts")}
-        latest_analysis = {**summary, "summary": summary_data, "graph": graph, "transaction_records": records}
+        latest_analysis = {
+            **summary,
+            "summary": summary_data,
+            "graph": graph,
+            "transaction_records": records,
+            "dataset_name": file.filename or "Uploaded transaction CSV",
+            "data_source": "Synthetic demo dataset" if (file.filename or "").startswith("undertow-synthetic-demo") else "Analyst-uploaded CSV",
+            "analyzed_at": utc_now().isoformat(),
+        }
         return latest_analysis
     except HTTPException:
         raise
@@ -318,6 +334,105 @@ def get_graph(user=Depends(get_current_user)): return analysis_or_404()["graph"]
 def get_transactions(user=Depends(get_current_user)):
     records = analysis_or_404()["transaction_records"]
     return {"transactions": records, "count": len(records)}
+
+
+@app.post("/api/demo/load")
+async def load_demo_dataset(user=Depends(require_csrf)):
+    """Load only the repository's clearly labelled synthetic demo dataset."""
+    sample = APP_DIR / "sample_data" / "transactions.csv"
+    if not sample.exists():
+        raise HTTPException(status_code=404, detail="Synthetic demo dataset is unavailable.")
+    demo_file = UploadFile(filename="undertow-synthetic-demo.csv", file=io.BytesIO(sample.read_bytes()))
+    return await analyze_csv(demo_file, user)
+
+
+def rule_contributions(account):
+    contributions = []
+    for reason in account.get("reasons", []):
+        score = 25 if "circular" in reason else 15 if "device or IP" in reason else 20
+        contributions.append({"rule": reason, "score_contribution": score})
+    return contributions
+
+
+def priority_for(account, graph):
+    """Operational ordering only; it deliberately remains separate from risk."""
+    connected = sum(1 for edge in graph["edges"] if edge["source"] == account["account_id"] or edge["target"] == account["account_id"])
+    score = min(100, int(account.get("risk_score", 0)) + len(account.get("reasons", [])) * 5 + min(15, connected * 2))
+    label = "Urgent" if score >= 80 else "High" if score >= 60 else "Standard"
+    explanation = f"Risk {account.get('risk_score', 0)}, {len(account.get('reasons', []))} signal(s), and {connected} direct relationship(s)."
+    return {"priority_score": score, "priority_label": label, "priority_explanation": explanation}
+
+
+@app.get("/api/priorities")
+def get_priorities(user=Depends(get_current_user)):
+    analysis = analysis_or_404()
+    cases = [{**account, **priority_for(account, analysis["graph"])} for account in analysis["alerts"]]
+    return {"cases": sorted(cases, key=lambda case: case["priority_score"], reverse=True), "definition": "Operational priority combines existing risk, configured signals, and direct graph relationships. It is not a fraud finding."}
+
+
+@app.get("/api/copilot/{account_id}")
+def investigation_copilot(account_id: str, user=Depends(get_current_user)):
+    """Deterministic, evidence-grounded explanation; it never calls an LLM."""
+    analysis = analysis_or_404()
+    normalized = account_id.strip()
+    account = next((item for item in analysis["accounts_data"] if item["account_id"] == normalized), None)
+    if not account:
+        raise HTTPException(status_code=404, detail="Account was not found in the current analysis.")
+    transactions = [record for record in analysis["transaction_records"] if record["sender_account"] == normalized or record["receiver_account"] == normalized]
+    connections = [edge for edge in analysis["graph"]["edges"] if str(edge["source"]) == normalized or str(edge["target"]) == normalized]
+    contributions = rule_contributions(account)
+    factual_summary = f"{normalized} has a {account['risk_level'].lower()} risk score of {account['risk_score']} based on {len(contributions)} configured detection signal{'s' if len(contributions) != 1 else ''}."
+    questions = ["Confirm the purpose and counterparties for the recorded transfers."]
+    if account["incoming_count"] and account["outgoing_count"]:
+        questions.append("Review whether inbound and outbound transfers represent a rapid pass-through pattern.")
+    if any("device or IP" in item["rule"] for item in contributions):
+        questions.append("Validate whether shared device or IP identifiers are expected for these accounts.")
+    return {
+        "mode": "deterministic_template",
+        "label": "Simulated investigation copilot — deterministic explanation, not an AI model.",
+        "account_id": normalized,
+        "case_summary": factual_summary,
+        "verified_facts": {"incoming_transactions": account["incoming_count"], "outgoing_transactions": account["outgoing_count"], "incoming_value": account["incoming_amount"], "outgoing_value": account["outgoing_amount"], "connected_accounts": len(connections)},
+        "rule_contributions": contributions,
+        "transactions": transactions,
+        "connections": connections,
+        "unresolved_questions": questions,
+        "suggested_checks": ["Review transaction references and account ownership evidence.", "Compare activity with the institution's authorised customer and payment context."],
+        "disclaimer": "Risk indicators guide investigation and do not establish wrongdoing.",
+    }
+
+
+@app.get("/api/fund-trace")
+def fund_trace(source: str, destination: str, user=Depends(get_current_user)):
+    analysis = analysis_or_404()
+    source, destination = source.strip(), destination.strip()
+    if not source or not destination:
+        raise HTTPException(status_code=400, detail="Source and destination accounts are required.")
+    adjacency = {}
+    for record in analysis["transaction_records"]:
+        adjacency.setdefault(record["sender_account"], set()).add(record["receiver_account"])
+    queue, parents = deque([source]), {source: None}
+    while queue and destination not in parents:
+        current = queue.popleft()
+        for neighbor in adjacency.get(current, set()):
+            if neighbor not in parents:
+                parents[neighbor] = current
+                queue.append(neighbor)
+    if destination not in parents:
+        return {"source": source, "destination": destination, "path": [], "message": "No directed relationship path was found in the current dataset."}
+    accounts = []
+    cursor = destination
+    while cursor is not None:
+        accounts.append(cursor); cursor = parents[cursor]
+    accounts.reverse()
+    steps, previous_time = [], None
+    for sender, receiver in zip(accounts, accounts[1:]):
+        candidates = [record for record in analysis["transaction_records"] if record["sender_account"] == sender and record["receiver_account"] == receiver]
+        record = sorted(candidates, key=lambda item: item["timestamp"])[0]
+        timestamp = datetime.fromisoformat(record["timestamp"])
+        steps.append({**record, "elapsed_seconds_from_previous": int((timestamp - previous_time).total_seconds()) if previous_time else None})
+        previous_time = timestamp
+    return {"source": source, "destination": destination, "accounts": accounts, "path": steps, "message": "This shows observed directed relationships, not proof that the same funds moved through every step."}
 
 
 @app.post("/api/reviews")
@@ -346,3 +461,14 @@ def get_review(account_id: str, user=Depends(get_current_user)):
     with database() as connection:
         history = [dict(row) for row in connection.execute("SELECT account_id, status, note, analyst_id, analyst_name, reviewed_at FROM reviews WHERE account_id = ? ORDER BY id", (normalized_account_id,)).fetchall()]
     return {"account_id": normalized_account_id, "history": history, "count": len(history)}
+
+
+@app.get("/api/reviews")
+def get_recent_reviews(user=Depends(get_current_user)):
+    """Return recent persisted analyst decisions for the authenticated workspace."""
+    with database() as connection:
+        history = [dict(row) for row in connection.execute(
+            "SELECT account_id, status, note, analyst_id, analyst_name, reviewed_at "
+            "FROM reviews ORDER BY id DESC LIMIT 20"
+        ).fetchall()]
+    return {"history": history, "count": len(history)}
