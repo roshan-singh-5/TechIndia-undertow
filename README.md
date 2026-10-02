@@ -268,9 +268,7 @@ Update the following section with the actual team details before submission.
 | Name | Role |
 |---|---|
 | Roshan Singh | [Actual contribution / role] |
-| [Team Member 2] | [Role / contribution] |
-| [Team Member 3] | [Role / contribution] |
-| [Team Member 4] | [Role / contribution] |
+| Shivam tiwari| [Role / contribution] |
 
 Remove unused rows and ensure names and contributions are accurate.
 
