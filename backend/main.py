@@ -18,6 +18,7 @@ from pydantic import BaseModel, field_validator
 
 from detector import analyze_transactions
 from graph_engine import build_transaction_graph
+from assistant_service import deterministic_reply, optional_llm_reply
 
 APP_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = Path(os.getenv("UNDERTOW_DATABASE_PATH", APP_DIR / "undertow.db"))
@@ -27,6 +28,8 @@ FRONTEND_ORIGINS = [origin.strip() for origin in os.getenv("UNDERTOW_FRONTEND_OR
 REQUIRED_COLUMNS = ["transaction_id", "timestamp", "sender_account", "receiver_account", "amount"]
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+ASSISTANT_CONVERSATIONS: dict[int, deque] = {}
+ASSISTANT_ATTEMPTS: dict[int, list[float]] = {}
 latest_analysis = None
 
 app = FastAPI(title="UNDERTOW API", description="Financial Crime Intelligence API", version="0.2.0")
@@ -74,6 +77,10 @@ def initialize_database():
         );
         CREATE INDEX IF NOT EXISTS reviews_account_id_idx ON reviews(account_id, reviewed_at);
         """)
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+        for name, definition in [("timezone", "TEXT NOT NULL DEFAULT 'UTC'"), ("date_format", "TEXT NOT NULL DEFAULT 'local'")]:
+            if name not in columns:
+                connection.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
 
 
 initialize_database()
@@ -102,7 +109,7 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def public_user(row):
-    return {"id": row["id"], "full_name": row["full_name"], "email": row["email"], "analyst_id": row["analyst_id"], "role": row["role"], "created_at": row["created_at"]}
+    return {"id": row["id"], "full_name": row["full_name"], "email": row["email"], "analyst_id": row["analyst_id"], "role": row["role"], "created_at": row["created_at"], "timezone": row["timezone"] if "timezone" in row.keys() else "UTC", "date_format": row["date_format"] if "date_format" in row.keys() else "local", "active": bool(row["active"])}
 
 
 def session_hash(token: str) -> str:
@@ -208,6 +215,50 @@ class ReviewRequest(BaseModel):
         return value
 
 
+class AssistantChatRequest(BaseModel):
+    message: str
+    selected_account_id: str = ""
+
+    @field_validator("message")
+    @classmethod
+    def valid_message(cls, value):
+        cleaned = value.strip()
+        if not cleaned or len(cleaned) > 1500:
+            raise ValueError("Enter a message between 1 and 1,500 characters.")
+        return cleaned
+
+    @field_validator("selected_account_id")
+    @classmethod
+    def valid_selected_account(cls, value):
+        return value.strip()[:120]
+
+
+class ProfileUpdateRequest(BaseModel):
+    full_name: str
+    timezone: str = "UTC"
+    date_format: str = "local"
+
+    @field_validator("full_name")
+    @classmethod
+    def profile_name(cls, value):
+        value = value.strip()
+        if not 2 <= len(value) <= 120:
+            raise ValueError("Display name must be between 2 and 120 characters.")
+        return value
+
+    @field_validator("timezone")
+    @classmethod
+    def profile_timezone(cls, value):
+        return value.strip()[:64] or "UTC"
+
+    @field_validator("date_format")
+    @classmethod
+    def profile_date_format(cls, value):
+        if value not in {"local", "iso"}:
+            raise ValueError("Date format must be local or iso.")
+        return value
+
+
 @app.get("/")
 def health_check():
     return {"app": "UNDERTOW", "status": "running", "version": "0.2.0"}
@@ -252,6 +303,49 @@ def me(user=Depends(get_current_user)):
     result = public_user(user)
     result["csrf_token"] = user["csrf_token"]
     return {"user": result}
+
+
+@app.get("/api/profile")
+def get_profile(user=Depends(get_current_user)):
+    profile = public_user(user)
+    with database() as connection:
+        latest_session = connection.execute("SELECT created_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user["id"],)).fetchone()
+        active_sessions = connection.execute("SELECT COUNT(*) AS count FROM sessions WHERE user_id = ? AND expires_at > ?", (user["id"], utc_now().isoformat())).fetchone()["count"]
+    return {"profile": profile, "last_login": latest_session["created_at"] if latest_session else None, "active_sessions": active_sessions, "authentication": "Cookie-authenticated session"}
+
+
+@app.patch("/api/profile")
+def update_profile(payload: ProfileUpdateRequest, user=Depends(require_csrf)):
+    with database() as connection:
+        connection.execute("UPDATE users SET full_name = ?, timezone = ?, date_format = ? WHERE id = ?", (payload.full_name, payload.timezone, payload.date_format, user["id"]))
+        updated = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return {"message": "Profile preferences saved.", "profile": public_user(updated)}
+
+
+@app.get("/api/profile/analytics")
+def profile_analytics(days: str = "30", user=Depends(get_current_user)):
+    limit = None if days == "all" else int(days) if days in {"7", "30", "90"} else 30
+    since = (utc_now() - timedelta(days=limit)).isoformat() if limit else None
+    query = "SELECT account_id, status, note, reviewed_at FROM reviews WHERE user_id = ?"
+    values = [user["id"]]
+    if since:
+        query += " AND reviewed_at >= ?"; values.append(since)
+    query += " ORDER BY reviewed_at DESC"
+    with database() as connection:
+        records = [dict(row) for row in connection.execute(query, values).fetchall()]
+    status_counts = {status: sum(item["status"] == status for item in records) for status in ("Pending", "Confirmed Suspicious", "Cleared")}
+    timeline = {}
+    for item in records:
+        day = item["reviewed_at"][:10]
+        timeline[day] = timeline.get(day, 0) + 1
+    return {"period": days, "review_actions": len(records), "unique_cases": len({item["account_id"] for item in records}), "status_distribution": status_counts, "updated_last_7_days": sum(datetime.fromisoformat(item["reviewed_at"]) >= utc_now() - timedelta(days=7) for item in records), "timeline": [{"date": date, "reviews": count} for date, count in sorted(timeline.items())], "recent": records[:10], "definition": "Review actions are saved review records by the authenticated analyst. Unique cases count distinct accounts in those records; no assignment or performance score is tracked."}
+
+
+@app.get("/api/profile/activity")
+def profile_activity(days: str = "30", user=Depends(get_current_user)):
+    analytics = profile_analytics(days, user)
+    events = [{"type": "review", "account_id": item["account_id"], "status": item["status"], "note": item["note"], "timestamp": item["reviewed_at"], "description": f"Recorded {item['status']} review"} for item in analytics["recent"]]
+    return {"events": events, "count": len(events), "note": "Only persisted review decisions are shown; page views and unrecorded activity are not tracked."}
 
 
 @app.post("/api/auth/logout")
@@ -334,6 +428,30 @@ def get_graph(user=Depends(get_current_user)): return analysis_or_404()["graph"]
 def get_transactions(user=Depends(get_current_user)):
     records = analysis_or_404()["transaction_records"]
     return {"transactions": records, "count": len(records)}
+
+
+@app.post("/api/assistant/chat")
+def assistant_chat(payload: AssistantChatRequest, user=Depends(get_current_user)):
+    """Authenticated, bounded assistant. Conversation state is isolated per analyst session user."""
+    now = time.monotonic()
+    attempts = [stamp for stamp in ASSISTANT_ATTEMPTS.get(user["id"], []) if now - stamp < 60]
+    if len(attempts) >= 20:
+        raise HTTPException(status_code=429, detail="Too many assistant requests. Please wait a minute.")
+    attempts.append(now)
+    ASSISTANT_ATTEMPTS[user["id"]] = attempts
+    analysis = analysis_or_404()
+    history = ASSISTANT_CONVERSATIONS.setdefault(user["id"], deque(maxlen=12))
+    message = payload.message
+    if payload.selected_account_id and payload.selected_account_id in {item["account_id"] for item in analysis["accounts_data"]}:
+        message = f"{message}\nSelected account context: {payload.selected_account_id}"
+    fallback, actions = deterministic_reply(message, analysis, list(history))
+    minimal_context = {"dataset_source": analysis.get("data_source"), "summary": analysis["summary"], "fallback_evidence": fallback[:3500]}
+    llm_response = optional_llm_reply(payload.message, minimal_context)
+    response = llm_response or fallback
+    mode = "llm" if llm_response else "deterministic_fallback"
+    history.append({"role": "user", "content": payload.message})
+    history.append({"role": "assistant", "content": response})
+    return {"response": response, "mode": mode, "label": "Model-assisted suggestion; verify against case evidence." if llm_response else "Deterministic UNDERTOW fallback — derived from the current authorised analysis, not an AI model.", "actions": actions}
 
 
 @app.post("/api/demo/load")

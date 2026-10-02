@@ -17,6 +17,7 @@ Copy `backend/.env.example` to `backend/.env` only if you need to override devel
 - Analyst review statuses (`Pending`, `Confirmed Suspicious`, `Cleared`) and audit history
 - Deterministic Investigation Copilot API: account facts, detector-rule contributions, evidence questions, and suggested checks; it is explicitly not an LLM or an automated decision
 - Fund Trace and an Integration Hub with a clearly labelled synthetic-only Demo Bank Connector
+- Authenticated floating UNDERTOW AI assistant with quick prompts, evidence-bounded deterministic fallback responses, and optional server-side model assistance
 
 ## Stack and structure
 
@@ -57,6 +58,14 @@ Required columns are `transaction_id`, `timestamp`, `sender_account`, `receiver_
 - `GET /api/summary`, `/api/alerts`, `/api/graph`, `/api/transactions` — latest analysis
 - `POST /api/demo/load` — load the repository's synthetic demo fixture
 - `GET /api/copilot/{account_id}`, `GET /api/fund-trace`, `GET /api/priorities` — evidence brief, observed relationship trace, and transparent operational ordering
+- `POST /api/assistant/chat` — authenticated assistant chat; responses are deterministic unless a server-side provider is configured
+- `GET /api/profile`, `PATCH /api/profile`, `GET /api/profile/analytics`, `GET /api/profile/activity` — session-derived profile, permitted preferences, and authenticated analyst-only review activity
+
+## Optional AI provider
+
+The assistant works without an AI key. In that mode it returns a clearly labelled deterministic fallback based only on the current authorised analysis, graph, detector rules, and account records. It does not make review decisions.
+
+To enable the optional OpenAI adapter, install the official package (`pip install openai`), set `UNDERTOW_AI_PROVIDER=openai`, `OPENAI_API_KEY`, and optionally `UNDERTOW_AI_MODEL` in a server-side `backend/.env` or deployment secret store. Never place these values in `VITE_*` variables or frontend code. If the provider is unavailable or times out, UNDERTOW safely falls back to deterministic responses.
 - `POST /api/reviews` — save an account review
 - `GET /api/reviews/{account_id}` — review history
 
