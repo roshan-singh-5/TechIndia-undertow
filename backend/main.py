@@ -152,17 +152,17 @@ async def upload_transactions(file: UploadFile = File(...)):
         graph = build_transaction_graph(df)
 
         latest_analysis = {
-            "summary": {
-                "transactions": summary["transactions"],
-                "accounts": summary["accounts"],
-                "total_amount": summary["total_amount"],
-                "flagged_accounts": 0,
-            },
-            "accounts": summary["accounts_data"],
-            "alerts": [],
-            "graph": graph,
-            "detection_status": "Basic analysis only",
-        }
+    "summary": {
+        "transactions": summary["transactions"],
+        "accounts": summary["accounts"],
+        "total_amount": summary["total_amount"],
+        "flagged_accounts": summary["flagged_accounts"],
+    },
+    "accounts": summary["accounts_data"],
+    "alerts": summary["alerts"],
+    "graph": graph,
+    "detection_status": "Rule-based analysis",
+}
 
         return latest_analysis
 
