@@ -1,0 +1,12 @@
+.risk-summary {
+  display: flex;
+  gap: 18px;
+  padding: 9px 2px 0;
+  border-top: 1px solid #edf1f5;
+  color: #65788c;
+  font-size: 11px;
+}
+.risk-summary span { display: flex; align-items: center; gap: 5px; }
+.risk-summary b { color: var(--ink); font: 700 13px Manrope; }
+.risk-summary i { width: 8px; height: 8px; border-radius: 50%; background: #8aa7c4; }
+.risk-summary .flagged-dot { background: #c53d35; }

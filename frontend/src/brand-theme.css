@@ -1,0 +1,18 @@
+/* Brand colors are intentionally independent of generic surface text. The sidebar
+   always uses the dark lockup, while public/auth pages follow the active theme. */
+:root { --brand-text: #111827; --brand-subtitle: #4b5563; }
+:root[data-theme="dark"] { --brand-text: #f9fafb; --brand-subtitle: #b9c7d9; }
+
+.brand.brand-v2:not(.dark) { color: var(--brand-text) !important; }
+.brand.brand-v2:not(.dark) .wordmark { color: var(--brand-text) !important; }
+.brand.brand-v2:not(.dark) small { color: var(--brand-subtitle) !important; opacity: 1; }
+
+/* The application sidebar remains navy in both themes. */
+.shell > aside .brand.brand-v2.dark,
+.brand.brand-v2.dark { --brand-text: #f9fafb; --brand-subtitle: #b9c7d9; color: var(--brand-text) !important; }
+.shell > aside .brand.brand-v2.dark .wordmark,
+.brand.brand-v2.dark .wordmark { color: var(--brand-text) !important; }
+.shell > aside .brand.brand-v2.dark small,
+.brand.brand-v2.dark small { color: var(--brand-subtitle) !important; opacity: 1; }
+
+.brand.brand-v2 .undertow-mark { opacity: 1; mix-blend-mode: normal; -webkit-text-fill-color: currentColor; }
