@@ -1,0 +1,61 @@
+/* Compact authenticated workspace layout. Keeps every panel aligned to the viewport. */
+.shell-v3 .workspace {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  padding: 20px 24px 24px;
+}
+
+.shell-v3 .app-header-v3 {
+  margin: -20px -24px 18px;
+  padding: 12px 24px;
+  min-height: 64px;
+}
+
+.shell-v3 .workspace > .error { margin: 0 0 12px; }
+.shell-v3 .card { margin-bottom: 12px; padding: 18px; }
+.shell-v3 .metrics { gap: 10px; margin-bottom: 12px; }
+.shell-v3 .dashboard-v2,
+.shell-v3 .extension-page,
+.shell-v3 .investigation-center,
+.shell-v3 .profile-page,
+.shell-v3 .copilot-page { gap: 12px; }
+.shell-v3 .dashboard-analytics,
+.shell-v3 .dashboard-grid,
+.shell-v3 .case-detail,
+.shell-v3 .setup-guide { gap: 12px; }
+.shell-v3 .dashboard-context { padding: 0 0 2px; }
+.shell-v3 .network-workspace { margin: 0; }
+.shell-v3 .network-title { padding: 17px 20px 13px; }
+.shell-v3 .graph-toolbar { padding: 10px 20px; }
+.shell-v3 .network-canvas { min-height: min(560px, calc(100vh - 255px)); }
+.shell-v3 .extension-heading h2,
+.shell-v3 .case-heading h2 { font-size: 21px; }
+.shell-v3 .extension-heading p:not(.kicker),
+.shell-v3 .case-heading p:not(.kicker) { margin-top: 3px; }
+.shell-v3 .connector-card { padding: 16px; }
+.shell-v3 .setup-guide .card { height: 100%; }
+.shell-v3 .copilot-page-card { padding: 20px; }
+.shell-v3 .empty { min-height: 170px; padding: 24px; }
+
+@media (max-width: 900px) {
+  .shell-v3 .workspace { padding: 16px; }
+  .shell-v3 .app-header-v3 {
+    margin: -16px -16px 14px;
+    padding: 12px 16px;
+  }
+  .shell-v3 .network-canvas { min-height: 460px; }
+}
+
+@media (max-width: 650px) {
+  .shell-v3 .workspace { padding: 12px; }
+  .shell-v3 .app-header-v3 {
+    margin: -12px -12px 12px;
+    padding: 10px 12px;
+  }
+  .shell-v3 .card { padding: 15px; }
+  .shell-v3 .network-title { padding: 14px 15px 11px; }
+  .shell-v3 .graph-toolbar { padding: 10px 15px; }
+  .shell-v3 .network-canvas { min-height: 420px; }
+  .shell-v3 .dashboard-context { display: grid; gap: 8px; }
+}

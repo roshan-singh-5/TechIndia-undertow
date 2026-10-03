@@ -1,7 +1,23 @@
 """Evidence-bounded assistant responses for the current UNDERTOW analysis."""
 import os
 import re
+import json
+import urllib.error
+import urllib.request
 from collections import deque
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    # Environment variables are still supported when python-dotenv is absent.
+    pass
+
+try:
+    from openai import OpenAI
+except ImportError:  # optional until the backend requirements are installed
+    OpenAI = None
 
 
 ACCOUNT_PATTERN = re.compile(r"\b[A-Za-z]{2,8}[-_]?\d{2,}\b")
@@ -71,16 +87,62 @@ def deterministic_reply(message, analysis, history):
 
 
 def optional_llm_reply(message, context):
-    """Optional adapter. It is only attempted with explicit server configuration."""
-    if os.getenv("UNDERTOW_AI_PROVIDER", "").lower() != "openai" or not os.getenv("OPENAI_API_KEY"):
+    """Call an OpenAI-compatible provider only with explicit backend configuration.
+
+    The browser never sees these settings. An empty configuration intentionally
+    returns ``None`` so the evidence-bounded deterministic assistant remains usable.
+    """
+    provider = os.getenv("AI_PROVIDER", os.getenv("UNDERTOW_AI_PROVIDER", "")).strip().lower()
+    api_key = os.getenv("AI_API_KEY", os.getenv("OPENAI_API_KEY", "")).strip()
+    model = os.getenv("AI_MODEL", os.getenv("UNDERTOW_AI_MODEL", "")).strip()
+    if provider != "openai" or not api_key or not model:
         return None
+    base_url = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    system_prompt = "You are UNDERTOW Copilot, an assistant for financial transaction investigation. Use only supplied UNDERTOW records. Distinguish observed facts from interpretations, reference IDs and rules when available, never invent evidence, never call a risk score a fraud probability, and never declare wrongdoing. Suggest next checks without making analyst decisions."
+    user_prompt = f"Question: {message}\n\nMinimal authorised context:\n{json.dumps(context, ensure_ascii=False, default=str)}"
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=12.0)
-        response = client.responses.create(model=os.getenv("UNDERTOW_AI_MODEL", "gpt-4.1-mini"), input=[
-            {"role": "system", "content": "You are UNDERTOW AI. Use only the authorised, minimal context supplied. Never claim fraud, never make review decisions, and label suggested checks as suggestions."},
-            {"role": "user", "content": f"Question: {message}\n\nAuthorised context: {context}"},
-        ])
-        return response.output_text.strip() or None
+        if OpenAI is not None:
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=12.0)
+            response = client.responses.create(
+                model=model,
+                store=False,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            answer = str(getattr(response, "output_text", "")).strip()
+            if answer:
+                return answer
+
+        # Keep the integration usable in minimal deployments where the optional
+        # SDK is not installed. This remains backend-only and sends only the
+        # bounded context prepared by the endpoint above.
+        request = urllib.request.Request(
+            f"{base_url}/chat/completions",
+            data=json.dumps({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 700,
+            }).encode("utf-8"),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=12) as result:
+            body = json.loads(result.read().decode("utf-8"))
+        answer = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return str(answer).strip() or None
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, KeyError, IndexError):
+        return None
     except Exception:
         return None
+
+
+def ai_configuration():
+    provider = os.getenv("AI_PROVIDER", os.getenv("UNDERTOW_AI_PROVIDER", "")).strip().lower()
+    configured = provider == "openai" and bool(os.getenv("AI_API_KEY", os.getenv("OPENAI_API_KEY", "")).strip()) and bool(os.getenv("AI_MODEL", os.getenv("UNDERTOW_AI_MODEL", "")).strip())
+    return {"configured": configured, "provider": provider or None, "model": os.getenv("AI_MODEL", os.getenv("UNDERTOW_AI_MODEL", "")).strip() or None}

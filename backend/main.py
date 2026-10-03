@@ -18,7 +18,7 @@ from pydantic import BaseModel, field_validator
 
 from detector import analyze_transactions
 from graph_engine import build_transaction_graph
-from assistant_service import deterministic_reply, optional_llm_reply
+from assistant_service import ai_configuration, deterministic_reply, optional_llm_reply
 
 APP_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = Path(os.getenv("UNDERTOW_DATABASE_PATH", APP_DIR / "undertow.db"))
@@ -26,6 +26,14 @@ SESSION_HOURS = int(os.getenv("UNDERTOW_SESSION_HOURS", "8"))
 COOKIE_SECURE = os.getenv("UNDERTOW_COOKIE_SECURE", "false").lower() == "true"
 FRONTEND_ORIGINS = [origin.strip() for origin in os.getenv("UNDERTOW_FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
 REQUIRED_COLUMNS = ["transaction_id", "timestamp", "sender_account", "receiver_account", "amount"]
+MAX_CSV_BYTES = 10 * 1024 * 1024
+COLUMN_ALIASES = {
+    "transaction_id": {"transaction_id", "transactionid", "transaction id", "txn_id", "tx_id", "reference", "reference_id"},
+    "sender_account": {"sender_account", "sender", "from_account", "from", "debit_account", "origin_account"},
+    "receiver_account": {"receiver_account", "receiver", "to_account", "to", "credit_account", "beneficiary_account", "destination_account"},
+    "amount": {"amount", "transaction_amount", "value", "transfer_amount"},
+    "timestamp": {"timestamp", "transaction_timestamp", "transaction_time", "date_time", "datetime", "date"},
+}
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 ASSISTANT_CONVERSATIONS: dict[int, deque] = {}
@@ -233,6 +241,12 @@ class AssistantChatRequest(BaseModel):
         return value.strip()[:120]
 
 
+@app.get("/api/assistant/status")
+def assistant_status(user=Depends(get_current_user)):
+    config = ai_configuration()
+    return {"configured": config["configured"], "provider": config["provider"], "model": config["model"], "fallback": "Rule-based assistant — AI provider not configured"}
+
+
 class ProfileUpdateRequest(BaseModel):
     full_name: str
     timezone: str = "UTC"
@@ -357,33 +371,75 @@ def logout(response: Response, user=Depends(require_csrf), undertow_session: Ann
     return {"message": "Signed out."}
 
 
-@app.post("/api/analyze")
-async def analyze_csv(file: UploadFile = File(...), user=Depends(require_csrf)):
+def _clean_column_name(value):
+    return re.sub(r"[\s_-]+", " ", str(value).strip().lower()).strip()
+
+
+def validate_bank_csv(contents: bytes, filename: str | None = None):
+    """Parse untrusted CSV bytes without persisting or logging transaction values."""
+    if not contents:
+        return None, {"valid": False, "message": "Uploaded CSV file is empty.", "valid_rows": 0, "rejected_rows": 0, "errors": []}
+    if len(contents) > MAX_CSV_BYTES:
+        return None, {"valid": False, "message": "CSV exceeds the 10 MB upload limit.", "valid_rows": 0, "rejected_rows": 0, "errors": []}
+    if filename and not filename.lower().endswith(".csv"):
+        return None, {"valid": False, "message": "Only .csv files are accepted.", "valid_rows": 0, "rejected_rows": 0, "errors": []}
+    try:
+        text = contents.decode("utf-8-sig")
+        df = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False, on_bad_lines="error")
+    except (UnicodeDecodeError, pd.errors.ParserError, ValueError):
+        return None, {"valid": False, "message": "CSV is malformed or is not UTF-8 text.", "valid_rows": 0, "rejected_rows": 0, "errors": []}
+    if df.empty:
+        return None, {"valid": False, "message": "CSV has headers but no transaction rows.", "valid_rows": 0, "rejected_rows": 0, "errors": []}
+
+    lookup = {_clean_column_name(column): column for column in df.columns}
+    mapping = {}
+    for target, aliases in COLUMN_ALIASES.items():
+        source = next((lookup.get(_clean_column_name(alias)) for alias in aliases if _clean_column_name(alias) in lookup), None)
+        if source:
+            mapping[target] = source
+    missing = [column for column in REQUIRED_COLUMNS if column not in mapping]
+    preview = df.head(10).fillna("").to_dict(orient="records")
+    if missing:
+        return None, {"valid": False, "message": "CSV is missing required transaction fields.", "missing_columns": missing, "received_columns": list(df.columns), "column_mapping": mapping, "preview": preview, "valid_rows": 0, "rejected_rows": len(df), "errors": []}
+
+    normalized = pd.DataFrame({target: df[source] for target, source in mapping.items()})
+    for optional in ("sender_device", "receiver_device", "sender_ip", "receiver_ip", "device_id", "ip_address", "transaction_type"):
+        source = lookup.get(_clean_column_name(optional))
+        if source:
+            normalized[optional] = df[source]
+    errors = []
+    normalized["amount"] = pd.to_numeric(normalized["amount"].astype(str).str.replace(",", "", regex=False).str.replace("$", "", regex=False).str.strip(), errors="coerce")
+    normalized["timestamp"] = pd.to_datetime(normalized["timestamp"].astype(str).str.strip(), errors="coerce", format="mixed", utc=True)
+    for index, row in normalized.iterrows():
+        row_errors = []
+        for column in ("transaction_id", "sender_account", "receiver_account"):
+            if not str(row[column]).strip(): row_errors.append(f"{column} is required")
+        if pd.isna(row["amount"]) or row["amount"] < 0: row_errors.append("amount must be a non-negative number")
+        if pd.isna(row["timestamp"]): row_errors.append("timestamp is invalid")
+        if row_errors: errors.append({"row": int(index) + 2, "errors": row_errors})
+    for column in ("transaction_id", "sender_account", "receiver_account"):
+        normalized[column] = normalized[column].astype(str).str.strip()
+    duplicate_mask = normalized["transaction_id"].duplicated(keep=False) & normalized["transaction_id"].ne("")
+    for index in normalized.index[duplicate_mask]:
+        entry = next((item for item in errors if item["row"] == int(index) + 2), None)
+        if entry: entry["errors"].append("transaction_id is duplicated")
+        else: errors.append({"row": int(index) + 2, "errors": ["transaction_id is duplicated"]})
+    errors.sort(key=lambda item: item["row"])
+    valid = not errors
+    report = {"valid": valid, "message": "CSV is ready to import." if valid else "Correct the listed rows before importing; the active analysis was not changed.", "received_columns": list(df.columns), "column_mapping": mapping, "preview": preview, "valid_rows": len(normalized) if valid else len(normalized) - len({item["row"] for item in errors}), "rejected_rows": len({item["row"] for item in errors}), "errors": errors[:100]}
+    return (normalized if valid else None), report
+
+
+async def read_and_validate_upload(file: UploadFile):
+    contents = await file.read()
+    if file.content_type and file.content_type not in {"text/csv", "application/csv", "application/vnd.ms-excel", "application/octet-stream"}:
+        raise HTTPException(status_code=415, detail="Only CSV uploads are accepted.")
+    return validate_bank_csv(contents, file.filename)
+
+
+def process_analysis(df, filename):
     global latest_analysis
     try:
-        contents = await file.read()
-        if not contents:
-            raise HTTPException(status_code=400, detail="Uploaded CSV file is empty.")
-        df = pd.read_csv(io.BytesIO(contents))
-        missing = [column for column in REQUIRED_COLUMNS if column not in df.columns]
-        if missing:
-            raise HTTPException(status_code=400, detail={"message": "CSV is missing required columns.", "missing_columns": missing, "received_columns": list(df.columns)})
-        df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        if df["amount"].isna().any() or (df["amount"] < 0).any():
-            raise HTTPException(status_code=400, detail="CSV contains invalid or negative values in amount.")
-        if df["timestamp"].isna().any():
-            raise HTTPException(status_code=400, detail="CSV contains invalid timestamp values.")
-        for column in ["transaction_id", "sender_account", "receiver_account"]:
-            if df[column].isna().any() or df[column].astype(str).str.strip().eq("").any():
-                raise HTTPException(status_code=400, detail=f"CSV contains empty values in {column}.")
-        df["transaction_id"] = df["transaction_id"].astype(str).str.strip()
-        df["sender_account"] = df["sender_account"].astype(str).str.strip()
-        df["receiver_account"] = df["receiver_account"].astype(str).str.strip()
-        duplicate_ids = df["transaction_id"].duplicated()
-        if duplicate_ids.any():
-            duplicates = df.loc[duplicate_ids, "transaction_id"].head(5).tolist()
-            raise HTTPException(status_code=400, detail={"message": "CSV contains duplicate transaction IDs.", "duplicate_transaction_ids": duplicates})
         summary, graph = analyze_transactions(df), build_transaction_graph(df)
         risk_map = {a["account_id"]: a for a in summary["accounts_data"]}
         with database() as connection:
@@ -401,15 +457,33 @@ async def analyze_csv(file: UploadFile = File(...), user=Depends(require_csrf)):
             "summary": summary_data,
             "graph": graph,
             "transaction_records": records,
-            "dataset_name": file.filename or "Uploaded transaction CSV",
-            "data_source": "Synthetic demo dataset" if (file.filename or "").startswith("undertow-synthetic-demo") else "Analyst-uploaded CSV",
+            "dataset_name": filename or "Uploaded transaction CSV",
+            "data_source": "Synthetic demo dataset" if (filename or "").startswith("undertow-synthetic-demo") else "Authorised analyst-uploaded CSV",
             "analyzed_at": utc_now().isoformat(),
         }
         return latest_analysis
-    except HTTPException:
-        raise
     except Exception:
         raise HTTPException(status_code=500, detail="Unable to analyze this CSV. Check its format and try again.")
+
+
+@app.post("/api/import/validate")
+async def validate_csv_import(file: UploadFile = File(...), user=Depends(require_csrf)):
+    _, report = await read_and_validate_upload(file)
+    return report
+
+
+@app.post("/api/import")
+async def import_csv(file: UploadFile = File(...), user=Depends(require_csrf)):
+    df, report = await read_and_validate_upload(file)
+    if not report["valid"]:
+        raise HTTPException(status_code=422, detail=report)
+    return process_analysis(df, file.filename)
+
+
+@app.post("/api/analyze")
+async def analyze_csv(file: UploadFile = File(...), user=Depends(require_csrf)):
+    """Backward-compatible alias for the validated import endpoint."""
+    return await import_csv(file, user)
 
 
 def analysis_or_404():
@@ -430,6 +504,7 @@ def get_transactions(user=Depends(get_current_user)):
     return {"transactions": records, "count": len(records)}
 
 
+@app.post("/api/copilot/chat")
 @app.post("/api/assistant/chat")
 def assistant_chat(payload: AssistantChatRequest, user=Depends(get_current_user)):
     """Authenticated, bounded assistant. Conversation state is isolated per analyst session user."""
@@ -445,7 +520,10 @@ def assistant_chat(payload: AssistantChatRequest, user=Depends(get_current_user)
     if payload.selected_account_id and payload.selected_account_id in {item["account_id"] for item in analysis["accounts_data"]}:
         message = f"{message}\nSelected account context: {payload.selected_account_id}"
     fallback, actions = deterministic_reply(message, analysis, list(history))
-    minimal_context = {"dataset_source": analysis.get("data_source"), "summary": analysis["summary"], "fallback_evidence": fallback[:3500]}
+    selected_id = payload.selected_account_id.strip() if payload.selected_account_id else None
+    account_context = next((item for item in analysis["accounts_data"] if item["account_id"] == selected_id), None) if selected_id else None
+    related = [item for item in analysis["transaction_records"] if item["sender_account"] == selected_id or item["receiver_account"] == selected_id][:12] if selected_id else []
+    minimal_context = {"dataset_source": analysis.get("data_source"), "summary": analysis["summary"], "account": account_context, "related_transactions": related, "fallback_evidence": fallback[:3500]}
     llm_response = optional_llm_reply(payload.message, minimal_context)
     response = llm_response or fallback
     mode = "llm" if llm_response else "deterministic_fallback"
@@ -461,7 +539,7 @@ async def load_demo_dataset(user=Depends(require_csrf)):
     if not sample.exists():
         raise HTTPException(status_code=404, detail="Synthetic demo dataset is unavailable.")
     demo_file = UploadFile(filename="undertow-synthetic-demo.csv", file=io.BytesIO(sample.read_bytes()))
-    return await analyze_csv(demo_file, user)
+    return await import_csv(demo_file, user)
 
 
 def rule_contributions(account):
